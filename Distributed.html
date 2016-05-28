@@ -1,0 +1,291 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title></title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <style type="text/css">
+div.sourceCode { overflow-x: auto; }
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; line-height: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; } /* Keyword */
+code > span.dt { color: #902000; } /* DataType */
+code > span.dv { color: #40a070; } /* DecVal */
+code > span.bn { color: #40a070; } /* BaseN */
+code > span.fl { color: #40a070; } /* Float */
+code > span.ch { color: #4070a0; } /* Char */
+code > span.st { color: #4070a0; } /* String */
+code > span.co { color: #60a0b0; font-style: italic; } /* Comment */
+code > span.ot { color: #007020; } /* Other */
+code > span.al { color: #ff0000; font-weight: bold; } /* Alert */
+code > span.fu { color: #06287e; } /* Function */
+code > span.er { color: #ff0000; font-weight: bold; } /* Error */
+code > span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+code > span.cn { color: #880000; } /* Constant */
+code > span.sc { color: #4070a0; } /* SpecialChar */
+code > span.vs { color: #4070a0; } /* VerbatimString */
+code > span.ss { color: #bb6688; } /* SpecialString */
+code > span.im { } /* Import */
+code > span.va { color: #19177c; } /* Variable */
+code > span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+code > span.op { color: #666666; } /* Operator */
+code > span.bu { } /* BuiltIn */
+code > span.ex { } /* Extension */
+code > span.pp { color: #bc7a00; } /* Preprocessor */
+code > span.at { color: #7d9029; } /* Attribute */
+code > span.do { color: #ba2121; font-style: italic; } /* Documentation */
+code > span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+code > span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+code > span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+  </style>
+</head>
+<body>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>
+Distributed Systems in Haskell :: Will Yager
+</title>
+<link href='http://fonts.googleapis.com/css?family=Lato' rel='stylesheet' type='text/css'> <link href='/post.css' rel='stylesheet' type="text/css">
+</head>
+<body>
+<!-- 2016-05 -->
+<p><br></p>
+<h3 id="blog"><a href="http://yager.io">Blog</a></h3>
+<h2 id="distributed-systems-in-haskell">Distributed Systems in Haskell</h2>
+<p>I recently completed Lorenzo Alvisi's Distributed Computing class at the University of Texas at Austin. This class had three substantial project components, which were to implement the Chandy-Lamport snapshot protocol, Paxos, and the Bayou distributed database algorithm. The class allowed for arbitrary language choice, so long as we adhered to the provided API. My project partner <a href="http://plankenau.com">Pato</a> and I decided to give it a go in Haskell.</p>
+<p>This turned out to be an excellent idea. We put in a fraction of the time most implementations (in Java or Python) required. (One classmate used Erlang to great success.)</p>
+<p>This article represents a summary of what I learned over the course of the class. Some of this is Haskell-specific, and some is good advice for distributed programming in general.</p>
+<h2 id="haskell-nonspecific-advice">Haskell-nonspecific Advice</h2>
+<h3 id="do-not-block">1: Do Not Block</h3>
+<p>Every single time we used blocking reads from the network, it came back to bite us in the ass. For example, we would send a <code>Ping</code> and wait for a <code>Pong</code> before continuing. This leads to all sorts of bad behavior. What happens if both servers <code>Ping</code> each other at the same time? Deadlock. Even blocking reads that seemed innocuous at first usually led to confusion and race conditions later on.</p>
+<p>Instead, use an asynchronous architecture. Your program should block in exactly one place. Each node in the system should have a &quot;superloop&quot; that performs blocking reads from the network using an <code>epoll</code>-like mechanism. Many concurrency-oriented libraries and languages (like Haskell or Erlang) will make this very easy (you may not even realize it's happening).</p>
+<h4 id="why">Why?</h4>
+<p>It may seem like this architecture introduces uneccesary logical complexity compared to a bit of blocking sprinkled throughout the code, but in every instance we came across, blocking in exactly one place turned out to be much easier. We eliminated all race conditions we came across and absolutely maximized performance by eliminating any unneccesary delays. A server that only blocks in one place is guaranteed to process any waiting message the moment it has free CPU cycles.</p>
+<h3 id="use-asynchronous-timing">2: Use Asynchronous Timing</h3>
+<p>Some algorithms (especially probabilistic ones) rely on things like timeouts.</p>
+<p>In our experience, implementing timeout and other time-based behavior as a blocking read with a timeout is a recipe for confusion.</p>
+<p>Instead, we found that the best approach was to spawn, for each node, a separate &quot;tick generator&quot; thread. This &quot;tick generator&quot; simply sends its parent thread an empty <code>Tick</code> message at a given frequency. By counting <code>Tick</code> messages, one can implement arbitrary timeout behavior without actually needing to deal with timeout reads. For example, one could have a <code>ticks_since_last_client_msg</code> counter. Every time the node gets a message from the client, it resets this counter to zero. Every time the node gets a tick, it increments the counter. If the counter reaches some pre-determined value, the node can assume the client has timed out.</p>
+<h4 id="why-1">Why?</h4>
+<p>There are several advantages to this approach.</p>
+<p>For one, it's often simpler than dealing with timeouts around blocking reads. Instead of having to write a separate exception handler that deals with timeouts, one just incorporates timeout logic into the rest of the server logic. <code>Tick</code>s are just plain old messages that we handle in the same way we handle any other message.</p>
+<p>Where this approach really shines is if you have multiple independent timeouts or different timeout behavior for different peers. Wrapping your reads in a 10-second timeout won't help you if every server except one dies, and that one living server keeps sending you a message every couple seconds. Now you have two different kinds of timeouts: never receiving a message from some server in particular, and never receiving a message from any server at all.</p>
+<p>If you use a tick-based approach, you can just keep a map from server names to the number of ticks it's been since you've heard from that server. If one of those numbers gets too large, you handle it in your server logic. Very easy!</p>
+<h3 id="separate-networking-and-logic">3: Separate Networking and Logic</h3>
+<p>Distributed systems papers are often as poorly written as they are clever. The included code rarely works properly, if at all. One bad habit that these papers tend to have is the thorough mixing of network operations and algorithm logic. It's pretty common to see things along the lines of</p>
+<pre><code>send(server,msg);
+x = receive_msg();
+y = process(x);
+send(server,y);</code></pre>
+<p>but with a lot more junk thrown in.</p>
+<p>It turns out that this is not conducive to clean, understandable code. There's a lot of implicit state being offloaded to the network when you structure things like this, and it makes it a lot harder to recover from things like network interruptions or servers going offline. You end up using timeouts and all sorts of ugly constructs to make things work.</p>
+<p>Instead, you should completely separate your server logic and your network functionality. Again, this might sound like a lot of work, but it's almost guaranteed to save you more time in the long run.</p>
+<p>In Haskell terms, your server logic will (ideally) have a type like this:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">serverStep ::</span> <span class="dt">Config</span> <span class="ot">-&gt;</span> <span class="dt">State</span> <span class="ot">-&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> (<span class="dt">State</span>, [<span class="dt">Message</span>])</code></pre></div>
+<p>In prose, the server logic takes three arguments:</p>
+<ul>
+<li>The server's configuration, which does not change (Hostname, directory, etc.)</li>
+<li>The server's previous state</li>
+<li>A message received from the network</li>
+</ul>
+<p>The server logic then returns</p>
+<ul>
+<li>the new server state</li>
+<li>a list of messages to send</li>
+</ul>
+<p>Then you just have to write a simple wrapper around this function that receives messages from the network, feeds them into the function, and sends the responses out to the network.</p>
+<p>With a bit of work, any program requiring a sequence of sends and receives can be transformed into this form (a single receive followed by arbitrarily many sends), so even an the most stubbornly ugly distributed paper can be adapted to this form.</p>
+<h4 id="why-2">Why?</h4>
+<ol style="list-style-type: decimal">
+<li>This form guarantees that you meet suggestion #1 and get all the advantages of doing so. In particular, your server will never waste time waiting for something to happen. It will process messages the moment they are available, because it never blocks unless absolutely necessary.</li>
+<li>Network code is simpler. There's just one place you send and receive messages, and it's very straightforward to implement.</li>
+<li><p>Testing is much easier. When your server logic is a pure function as described above, server behavior is entirely deterministic and much more amenable to testing. It's easy to build a test harness that &quot;simulates&quot; the network. All you have to do is keep a list of all your servers' states and a queue of messages waiting to be delivered. A test harness looks like this:</p>
+<pre><code>    while queue is not empty:
+       pop msg off queue
+       (new_state, new_msgs) = serverStep configs[msg.dest] states[msg.dest] msg
+       states[msg.dest] = new_state
+       put new_msgs into queue</code></pre></li>
+</ol>
+<p>If you want to test things like out-of-order message delivery, you just mix up your queue instead of putting messages in in order. You have complete control!</p>
+<h2 id="haskell-specific-advice">Haskell-specific Advice</h2>
+<h3 id="monad-it">1. Monad It</h3>
+<p>Note that the suggested server logic type</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">serverStep ::</span> <span class="dt">Config</span> <span class="ot">-&gt;</span> <span class="dt">State</span> <span class="ot">-&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> (<span class="dt">State</span>, [<span class="dt">Message</span>])</code></pre></div>
+<p>is entirely pure and does not admit side effects. Unfortunately, this is not always realistic (as servers have to make database queries and such). However, as long as we avoid making network queries or using thread delays or anything silly like that, we still get most of the benefits described above if our server logic has the type e.g.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">serverStep ::</span> <span class="dt">Config</span> <span class="ot">-&gt;</span> <span class="dt">State</span> <span class="ot">-&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> (<span class="dt">State</span>, [<span class="dt">Message</span>])</code></pre></div>
+<p>We might not specifically need IO (we could be using <code>ST</code> or some other monad), but for simplicity I'll leave it at that.</p>
+<p>We can do better, though.</p>
+<p>The <code>Config -&gt; ...</code> behavior is described by the <code>MonadReader</code> typeclass.</p>
+<p>The <code>... State -&gt; ... -&gt; IO (State, ...)</code> behavior is described by the <code>MonadState</code> typeclass.</p>
+<p>The <code>... -&gt; IO (..., [Message])</code> behavior is described by the <code>MonadWriter</code> typeclass.</p>
+<p>Therefore, we can easily transform between a function of the above type and something of the type</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">type</span> <span class="dt">ServerMonad</span> m <span class="fu">=</span> (<span class="dt">MonadIO</span> m, <span class="dt">MonadReader</span> <span class="dt">Config</span> m, <span class="dt">MonadState</span> <span class="dt">State</span> m, <span class="dt">MonadWriter</span> [<span class="dt">Message</span>] m)
+<span class="ot">serverStep ::</span> <span class="dt">ServerMonad</span> m <span class="ot">=&gt;</span> m ()</code></pre></div>
+<p>If we don't need <code>IO</code>, we can leave off the <code>MonadIO</code> constraint and still be 100% pure.</p>
+<h4 id="why-3">Why?</h4>
+<p>This one is a lot harder to explain if you're less familiar with Haskell. The question here is why</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">pureServerStep ::</span> <span class="dt">Config</span> <span class="ot">-&gt;</span> <span class="dt">State</span> <span class="ot">-&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> (<span class="dt">State</span>, [<span class="dt">Message</span>])
+<span class="ot">impureServerStep ::</span> <span class="dt">Config</span> <span class="ot">-&gt;</span> <span class="dt">State</span> <span class="ot">-&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> (<span class="dt">State</span>, [<span class="dt">Message</span>])</code></pre></div>
+<p>is worse than</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">type</span> <span class="dt">PureServerMonad</span> m <span class="fu">=</span> (<span class="dt">MonadReader</span> <span class="dt">Config</span> m, <span class="dt">MonadState</span> <span class="dt">State</span> m, <span class="dt">MonadWriter</span> [<span class="dt">Message</span>] m)
+<span class="ot">pureServerStep ::</span> <span class="dt">PureServerMonad</span> m <span class="ot">=&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> m ()
+<span class="kw">type</span> <span class="dt">ImpureServerMonad</span> m <span class="fu">=</span> (<span class="dt">MonadIO</span> m, <span class="dt">MonadReader</span> <span class="dt">Config</span> m, <span class="dt">MonadState</span> <span class="dt">State</span> m, <span class="dt">MonadWriter</span> [<span class="dt">Message</span>] m)
+<span class="ot">impureServerStep ::</span> <span class="dt">ImpureServerMonad</span> m <span class="ot">=&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span>  m ()</code></pre></div>
+<p>These two forms are exactly semantically equivalent, but the monad-heavy form automates all the repetitive work of aplying the function to a state, pulling out the messages and the new state, applying the next step to the new state, pulling out the newer state and the new messages, concatenating the messages, etc. etc.</p>
+<p>All of that work is very droll and predictable, and is already handled for us nicely by <code>MonadState</code> and <code>MonadWriter</code>. This means our code is shorter, cleaner, and less likely to contain mistakes (after a bit of up-front cost to define all our Monads and types and stuff).</p>
+<p>Note that <code>RWST Config [Message] State IO</code> satisfies <code>ImpureServerMonad</code> and <code>RWS Config [Message] State</code> satisfies <code>PureServerMonad</code>, so all the work of creating a monad is already done for us.</p>
+<p>Here's a quick bidirectional reduction proof showing that these two concepts (the function and the Monad) are semantically equivalent:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">logic ::</span> <span class="dt">Config</span> <span class="ot">-&gt;</span> <span class="dt">State</span> <span class="ot">-&gt;</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> (<span class="dt">State</span>, [<span class="dt">Message</span>])
+logic <span class="fu">=</span> \cfg state msg <span class="ot">-&gt;</span> execRWST (logicM msg) cfg state
+<span class="ot">logicM ::</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> <span class="dt">RWST</span> <span class="dt">Config</span> [<span class="dt">Message</span>] <span class="dt">State</span> <span class="dt">IO</span> ()
+logicM <span class="fu">=</span> \msg <span class="ot">-&gt;</span> <span class="dt">RWST</span> (\cfg state <span class="ot">-&gt;</span> logic cfg state msg <span class="fu">&gt;&gt;=</span> (\(s,w) <span class="ot">-&gt;</span> return ((),s,w)))</code></pre></div>
+<p>That is, the function form can always be implemented as the monad form and vice versa.</p>
+<h3 id="use-cloud-haskell">2. Use Cloud Haskell</h3>
+<p><a href="http://haskell-distributed.github.io">Cloud Haskell</a> is a library designed to make distributed systems development in Haskell obscenely easy. It takes advantage of Haskell's tremendous multithreading support and very powerful type system to allow for safe, fast, and simple message passing and control over a network. It does all the hard work of building a messaging layer, and it does it well.</p>
+<h3 id="use-lenses">3. Use Lenses</h3>
+<p>Many distributed systems algorithms are described in a very imperative way. Turns out that it's very easy to write imperative-style programs in Haskell in a very disciplined way.</p>
+<p>Lenses are a Haskell concept that are reasonably well described as setters and getters on steroids. They are objects that describe how to pull information out of and put information into data structures. For example, I could make a lens that describes how to get the second value out of a tuple and how to put something else in its place. (Turns out that this exists and is called <code>_2</code>.)</p>
+<p>Because Lenses are so well structured, one can programatically compose and manipulate lenses in very interesting ways.</p>
+<p>One of the interesting things the <code>lens</code> package exports is a series of operators that interface with <code>MonadState</code> and allow us to write code that looks just like regular imperative code. For example, if our <code>State</code> had a field called <code>counter</code> that held an <code>Int</code>, we could write</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">incMul ::</span> <span class="dt">PureServerMonad</span> m <span class="ot">=&gt;</span> m ()
+incMul <span class="fu">=</span> <span class="kw">do</span>
+    counter <span class="fu">+=</span> <span class="dv">1</span>
+    counter <span class="fu">*=</span> <span class="dv">2</span></code></pre></div>
+<h2 id="example">Example</h2>
+<p>Let's write a simple distributed application. We'll write some servers that send each other <code>Bing</code>s every once in a while, and if they get a <code>Bing</code> from someone, they send back a <code>Bong</code>. Each server counts the number of <code>Bing</code>s and <code>Bong</code>s it's received thus far.</p>
+<p><a href="http://0.0.0.0/Distributed/Distributed.hs">Completed code</a></p>
+<p>First, let's write out the types.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">BingBong</span> <span class="fu">=</span> <span class="dt">Bing</span> <span class="fu">|</span> <span class="dt">Bong</span>
+    <span class="kw">deriving</span> (<span class="dt">Show</span>, <span class="dt">Generic</span>, <span class="dt">Typeable</span>)
+<span class="kw">instance</span> <span class="dt">Binary</span> <span class="dt">BingBong</span>
+
+<span class="kw">data</span> <span class="dt">Message</span> <span class="fu">=</span> <span class="dt">Message</span> {<span class="ot">senderOf ::</span> <span class="dt">ProcessId</span>,<span class="ot"> recipientOf ::</span> <span class="dt">ProcessId</span>,<span class="ot"> msg ::</span> <span class="dt">BingBong</span>}
+               <span class="kw">deriving</span> (<span class="dt">Show</span>, <span class="dt">Generic</span>, <span class="dt">Typeable</span>)
+<span class="kw">instance</span> <span class="dt">Binary</span> <span class="dt">Message</span>
+
+<span class="kw">data</span> <span class="dt">Tick</span> <span class="fu">=</span> <span class="dt">Tick</span> <span class="kw">deriving</span> (<span class="dt">Show</span>, <span class="dt">Generic</span>, <span class="dt">Typeable</span>)
+<span class="kw">instance</span> <span class="dt">Binary</span> <span class="dt">Tick</span>
+
+<span class="kw">data</span> <span class="dt">ServerState</span> <span class="fu">=</span> <span class="dt">ServerState</span> {
+    _<span class="ot">bingCount ::</span> <span class="dt">Int</span>,
+    _<span class="ot">bongCount ::</span> <span class="dt">Int</span>,
+    _<span class="ot">randomGen ::</span> <span class="dt">StdGen</span>
+} <span class="kw">deriving</span> (<span class="dt">Show</span>)
+makeLenses <span class="ch">&#39;&#39;</span><span class="dt">ServerState</span>
+
+<span class="kw">data</span> <span class="dt">ServerConfig</span> <span class="fu">=</span> <span class="dt">ServerConfig</span> {
+<span class="ot">    myId  ::</span> <span class="dt">ProcessId</span>,
+<span class="ot">    peers ::</span> [<span class="dt">ProcessId</span>]
+} <span class="kw">deriving</span> (<span class="dt">Show</span>)
+
+<span class="kw">newtype</span> <span class="dt">ServerAction</span> a <span class="fu">=</span> <span class="dt">ServerAction</span> {<span class="ot">runAction ::</span> <span class="dt">RWS</span> <span class="dt">ServerConfig</span> [<span class="dt">Message</span>] <span class="dt">ServerState</span> a}
+    <span class="kw">deriving</span> (<span class="dt">Functor</span>, <span class="dt">Applicative</span>, <span class="dt">Monad</span>, <span class="dt">MonadState</span> <span class="dt">ServerState</span>,
+              <span class="dt">MonadWriter</span> [<span class="dt">Message</span>], <span class="dt">MonadReader</span> <span class="dt">ServerConfig</span>)</code></pre></div>
+<ul>
+<li><code>BingBong</code> is the type of a <code>Bing</code> or a <code>Bong</code>. All that stuff about <code>Generic</code>, <code>Typeable</code>, and <code>Binary</code> is for automatic derivation of the correct code to safely send and receive these values over the network. If we wanted, we could do this manually, but this is rarely useful when the compiler does a good and guaranteed correct job for us.</li>
+<li>A <code>Message</code> is what gets sent from server to server.</li>
+<li>A <code>Tick</code> is what each server's tick generator sends it.</li>
+<li>The <code>ServerState</code> is what it says on the tin. It has the counts and a random number generator state. Notice how we put underscores before the field names and then used <code>makeLenses</code> to generate Lenses for <code>bingCount</code>, <code>bongCount</code>, and <code>randomGen</code>. Note that, for testing purposes, we can use pre-determined random generator seeds! This means that we only get &quot;true&quot; randomness (i.e. actual pseudorandomness) when we want it, but we're fully deterministic when we want to be (like for testing). If we'd used side-effectful randomness (like C's <code>random()</code> or reading from <code>/dev/urandom</code>), we wouldn't get that.</li>
+<li><code>ServerConfig</code> is just the server's ID as well as a list of the IDs of all servers on the network.</li>
+<li><code>ServerAction</code> is a custom Monad that gives us all the behavior we want (reading a config, sending messages, and updating state). It's really just a wrapper around <code>RWS</code>, so we don't really have to do anything. We just tell the compiler which features we want copied from <code>RWS</code>, such as its <code>Monad</code> behavior.</li>
+</ul>
+<p>Now, let's write out our server logic.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">tickHandler ::</span> <span class="dt">Tick</span> <span class="ot">-&gt;</span> <span class="dt">ServerAction</span> ()
+tickHandler <span class="dt">Tick</span> <span class="fu">=</span> <span class="kw">do</span>
+    <span class="dt">ServerConfig</span> myPid peers <span class="ot">&lt;-</span> ask
+    random <span class="ot">&lt;-</span> randomWithin (<span class="dv">0</span>, length peers <span class="fu">-</span> <span class="dv">1</span>)
+    <span class="kw">let</span> peer <span class="fu">=</span> peers <span class="fu">!!</span> random
+    sendBingBongTo peer <span class="dt">Bing</span>
+
+<span class="ot">msgHandler ::</span> <span class="dt">Message</span> <span class="ot">-&gt;</span> <span class="dt">ServerAction</span> ()
+msgHandler (<span class="dt">Message</span> sender recipient <span class="dt">Bing</span>) <span class="fu">=</span> <span class="kw">do</span>
+    bingCount <span class="fu">+=</span> <span class="dv">1</span>
+    sendBingBongTo sender <span class="dt">Bong</span>
+msgHandler (<span class="dt">Message</span> sender recipient <span class="dt">Bong</span>) <span class="fu">=</span> <span class="kw">do</span>
+    bongCount <span class="fu">+=</span> <span class="dv">1</span>
+
+<span class="ot">sendBingBongTo ::</span> <span class="dt">ProcessId</span> <span class="ot">-&gt;</span> <span class="dt">BingBong</span> <span class="ot">-&gt;</span> <span class="dt">ServerAction</span> ()
+sendBingBongTo recipient bingbong <span class="fu">=</span> <span class="kw">do</span>
+    <span class="dt">ServerConfig</span> myId _ <span class="ot">&lt;-</span> ask
+    tell [<span class="dt">Message</span> myId recipient bingbong]
+
+<span class="ot">randomWithin ::</span> <span class="dt">Random</span> r <span class="ot">=&gt;</span> (r,r) <span class="ot">-&gt;</span> <span class="dt">ServerAction</span> r
+randomWithin bounds <span class="fu">=</span> randomGen <span class="fu">%%=</span> randomR bounds</code></pre></div>
+<ul>
+<li><code>tickHandler</code> processes <code>Tick</code>s. It randomly chooses a peer and sends that peer a <code>Bing</code>.</li>
+<li><code>msgHandler</code> processes <code>Message</code>s. It responds to <code>Bong</code>s and increments counters when appropriate.</li>
+<li><code>sendBingBongTo</code> is a helper function that creates a message annotated with the sender and receiver and then outputs the message (using <code>tell</code>, which lets us write to the <code>MonadWriter</code> output).</li>
+<li><code>randomWithin</code>, given an upper and lower bound, picks a random element in those bounds. It also updates the server's random number generator state.</li>
+</ul>
+<p>Let's write out the network stack (i.e. the necessarily impure part of our code).</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">runServer ::</span> <span class="dt">ServerConfig</span> <span class="ot">-&gt;</span> <span class="dt">ServerState</span> <span class="ot">-&gt;</span> <span class="dt">Process</span> ()
+runServer config state <span class="fu">=</span> <span class="kw">do</span>
+    <span class="kw">let</span> run handler msg <span class="fu">=</span> return <span class="fu">$</span> execRWS (runAction <span class="fu">$</span> handler msg) config state
+    (state&#39;, output) <span class="ot">&lt;-</span> receiveWait [
+            match <span class="fu">$</span> run msgHandler,
+            match <span class="fu">$</span> run tickHandler]
+    say <span class="fu">$</span> <span class="st">&quot;Current state: &quot;</span> <span class="fu">++</span> show state&#39;
+    mapM (\msg <span class="ot">-&gt;</span> send (recipientOf msg) msg) output
+    runServer config state&#39;</code></pre></div>
+<p>This takes a server's config and initial state. It waits for an incoming message and processes it using the server logic. It sends any messages the server outputs, and then repeats the process with the server's new state. Note that we use a <code>match</code> construct to wait for either <code>Tick</code>s or <code>Message</code>s, since those have different types (and therefore different handlers).</p>
+<p>We also use Cloud Haskell's <code>say</code> function, which sends debug messages to a process named <code>logger</code>. We do this instead of printing to standard output, because if <code>logger</code> is the only process printing things, we won't accidentally interleave two prints.</p>
+<p>Now let's write the initialization code.</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">spawnServer ::</span> <span class="dt">Process</span> <span class="dt">ProcessId</span>
+spawnServer <span class="fu">=</span> spawnLocal <span class="fu">$</span> <span class="kw">do</span>
+    myPid <span class="ot">&lt;-</span> getSelfPid
+    otherPids <span class="ot">&lt;-</span> expect
+    spawnLocal <span class="fu">$</span> forever <span class="fu">$</span> <span class="kw">do</span> 
+        liftIO <span class="fu">$</span> threadDelay (<span class="dv">10</span><span class="fu">^</span><span class="dv">6</span>)
+        send myPid <span class="dt">Tick</span>
+    randomGen <span class="ot">&lt;-</span> liftIO newStdGen
+    runServer (<span class="dt">ServerConfig</span> myPid otherPids) (<span class="dt">ServerState</span> <span class="dv">0</span> <span class="dv">0</span> randomGen)
+
+<span class="ot">spawnServers ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Process</span> ()
+spawnServers count <span class="fu">=</span> <span class="kw">do</span>
+    pids <span class="ot">&lt;-</span> replicateM count spawnServer
+    mapM_ (<span class="ot">`send`</span> pids) pids</code></pre></div>
+<ul>
+<li><code>spawnServer</code> spawns a new process which does the following:
+<ul>
+<li>Get my PID.</li>
+<li>Wait for someone to send me everyone's PIDs.</li>
+<li>Spawn a ticker process that sends me a <code>Tick</code> every second (1 million microseconds).</li>
+<li>Create a random number generator seed.</li>
+<li>Create the appropriate <code>ServerConfig</code> and initial <code>ServerState</code> and call <code>runServer</code>.</li>
+</ul></li>
+<li><code>spawnServers</code> (plural) simply spawns <code>count</code> servers using <code>spawnServer</code>, collects all their PIDs, and sends the list of PIDs to each server.</li>
+</ul>
+<p>And for our <code>main</code>:</p>
+<div class="sourceCode"><pre class="sourceCode haskell"><code class="sourceCode haskell">main <span class="fu">=</span> <span class="kw">do</span>
+    <span class="dt">Right</span> transport <span class="ot">&lt;-</span> createTransport <span class="st">&quot;localhost&quot;</span> <span class="st">&quot;0&quot;</span> defaultTCPParameters
+    backendNode <span class="ot">&lt;-</span> newLocalNode transport initRemoteTable
+    runProcess backendNode (spawnServers <span class="dv">10</span>)
+    putStrLn <span class="st">&quot;Push enter to exit&quot;</span>
+    getLine</code></pre></div>
+<ul>
+<li>First, we create a network transport endpoint. This is how Cloud Haskell actually talks over the network. (We don't use it here though.)</li>
+<li>Next, we create a local node (which manages all the processes on this machine) and attach it to the TCP transport.</li>
+<li>Next, we run <code>spawnServers 10</code> on our local node. If you recall, this spawns 10 communicating processes.</li>
+<li>Finally, we wait for the user to push enter before exiting.</li>
+</ul>
+<p><a href="http://0.0.0.0/Distributed/Distributed.hs">Completed code</a></p>
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-21050351-2', 'auto');
+  ga('send', 'pageview');
+
+</script>
+</body>
+</html>
+</body>
+</html>
