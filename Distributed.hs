@@ -72,11 +72,11 @@ randomWithin bounds = randomGen %%= randomR bounds
 runServer :: ServerConfig -> ServerState -> Process ()
 runServer config state = do
     let run handler msg = return $ execRWS (runAction $ handler msg) config state
-    (state', output) <- receiveWait [
+    (state', outputMessages) <- receiveWait [
             match $ run msgHandler,
             match $ run tickHandler]
     say $ "Current state: " ++ show state'
-    mapM (\msg -> send (recipientOf msg) msg) output
+    mapM (\msg -> send (recipientOf msg) msg) outputMessages
     runServer config state'
 
 spawnServer :: Process ProcessId
