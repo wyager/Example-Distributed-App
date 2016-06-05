@@ -22,13 +22,14 @@ import System.Random (StdGen, Random, randomR, newStdGen)
 
 data BingBong = Bing | Bong
     deriving (Show, Generic, Typeable)
-instance Binary BingBong
 
 data Message = Message {senderOf :: ProcessId, recipientOf :: ProcessId, msg :: BingBong}
                deriving (Show, Generic, Typeable)
-instance Binary Message
 
 data Tick = Tick deriving (Show, Generic, Typeable)
+
+instance Binary BingBong
+instance Binary Message
 instance Binary Tick
 
 data ServerState = ServerState {
